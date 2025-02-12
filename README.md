@@ -18,4 +18,4 @@ Instructions pour relancer SimLOD sur Juliet depuis une précédente compilation
 	scl enable gcc-toolset-14 bash
 	export CUDA_PATH=/usr/local/cuda-12.1
 	./SimLOD
-yé, ça marche² !
+yé, ça remarche !
