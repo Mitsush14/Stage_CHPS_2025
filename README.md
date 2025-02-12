@@ -2,24 +2,20 @@
 Mise en place d'un système Out-Of-Core pour le logiciel [SimLOD](https://github.com/m-schuetz/SimLOD)
 
 Instruction de compilation/installation pour SIMLOD sur Juliet :
-
-scl enable gcc-toolset-14 bash -> à refaire à chaque terminal
-si pas compilé : 
+	
+ 	scl enable gcc-toolset-14 bash
 	git clone https://github.com/m-schuetz/SimLOD.git
-
 	ajout de #include <stdint.h> dans fichier modules/progressive_octree/SimlodLoader.h
-
 	ajout de std:: devant appelle à format dans le fichier modules/progressive_octree/main_progressive_octree.cpp 
-
 	mkdir out && cd out
-
 	cmake .. && make
-export CUDA_PATH=/usr/local/cuda-12.1
-./SimLOD
+	export CUDA_PATH=/usr/local/cuda-12.1
+	./SimLOD
 yé, ça marche !
 
 Instructions pour relancer SimLOD sur Juliet depuis une précédente compilation/installation :
-scl enable gcc-toolset-14 bash
-export CUDA_PATH=/usr/local/cuda-12.1
-./SimLOD
+
+	scl enable gcc-toolset-14 bash
+	export CUDA_PATH=/usr/local/cuda-12.1
+	./SimLOD
 yé, ça marche² !
