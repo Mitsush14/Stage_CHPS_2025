@@ -948,6 +948,7 @@ void addBatch(
 
 
 /*
+	CEST CA QUI EST APPELE DANS [main_progressive_octree.cpp](le main), updateOctree
 	Kernel Cuda pour la construction de l'octree (__global__ = c'est sur le GPU, mais on peut l'appeler depuis le CPU)
 	-Initialisation des variables (grille, bloc, temps initial, allocator, allocator_persistent, numBatchesUploaded_global) TODO : voir comment fonctionne leur fonction d'allocation
 	-Allocation de la mémoire pour les variables de stats

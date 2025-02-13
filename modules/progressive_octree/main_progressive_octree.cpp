@@ -4,7 +4,6 @@
 #include <filesystem>
 #include <locale.h>
 #include <string>
-#include <queue>
 #include <vector>
 #include <mutex>
 #include <thread>
@@ -32,96 +31,102 @@ using namespace fmt;
 
 using namespace std;
 
-constexpr uint64_t PINNED_MEM_POOL_SIZE = 200;         // pool of pointers to batches of pinned memory
-constexpr uint64_t BATCH_STREAM_SIZE    = 50;          // ring buffer of batches that are async streamed to GPU
-constexpr uint64_t MAX_BATCH_SIZE       = 1'000'000;   // each loaded batch comprises <size> points
-constexpr int MAX_LOADQUEUE_SIZE        = 300;         // stop loading from disk if processing lags behind
+constexpr uint64_t PINNED_MEM_POOL_SIZE = 200;         // pool of pointers to batches of pinned memory -> définition d'une mémoire où l'os a pas vraiment d'accès
+constexpr uint64_t BATCH_STREAM_SIZE    = 50;          // ring buffer of batches that are async streamed to GPU -> définition d'un buffer de batch qui sont streamé de manière asynchrone sur le GPU
+constexpr uint64_t MAX_BATCH_SIZE       = 1'000'000;   // each loaded batch comprises <size> points -> chaque batch chargé comprend maximum MAX_BATCH_SIZE points
+constexpr int MAX_LOADQUEUE_SIZE        = 300;         // stop loading from disk if processing lags behind -> nombre max d'éléments en liste d'attente dans la lecture de fichier
 
-CudaPrint cudaprint;
+CudaPrint cudaprint; // Affichage des erreurs CUDA sur le terminal
 
-
+// Probablement le path vers le fichier à charger (il peut avoir plusieurs fichiers en même temps ?)
 vector<string> paths = {
 	"NONE",
 	// "d:/dev/pointclouds/riegl/retz.las",
 };
 
+// Structure représentant un slot de mémoire épinglée
+// Mémoire épinglée = région de la mémoire que l'OS ne peut pas paginé -> permet des transferts de données plus rapides entre CPU et GPU
 struct PinnedMemorySlot {
-	void* memLocation;
-	CUevent uploadEnd;
+	void* memLocation; // Emplacement de la mémoire épinglée
+	CUevent uploadEnd; // Permet de signaler la fin d'un transfert de données vers le GPU -> synchronise les opérations asynchrones entre CPU et GPU
 
 	// ReadFileEx with unbuffered flag has special alignment requirements.
 	// memLocation + memOffset gives the correct beginning of the data
-	uint64_t memOffset;
+	uint64_t memOffset; // Offset de la mémoire épinglée parce que ReadFileEx avec le flag unbuffered a des exigences d'alignement spéciales
 };
 
+// Définition d'une structure Point dans l'octree (mais déjà présente dans structures.cuh ?!)
 // Structure of a point in the octree
 struct Point{
-	float x;
-	float y;
-	float z;
-	union{
-		uint32_t color;
-		uint8_t rgba[4];
+	float x; // Coordonnée x
+	float y; // Coordonnée y
+	float z; // Coordonnée z
+	union{ // Union -> stocke plusieurs variables dans un seul espace mémoire (soit l'une, soit l'autre)
+		uint32_t color; // Couleur du point en rgba (pas sur) dans un entier 32 bits
+		uint8_t rgba[4]; // Couleur du point en rgba dans un tableau de 4 entiers 8 bits
 	};
 };
 
+// Structure représentant un node dans l'octree
 // Structure of a node in the octree
 struct PointBatch{
-	string file = "";
-	int first = 0;
-	int count = 0;
-	shared_ptr<vector<Point>> points;
-	PinnedMemorySlot pinnedMem;
+	string file = ""; // Nom du fichier associé au node
+	int first = 0; // Index du 1er point dans le node
+	int count = 0; // Nombre de points dans le node
+	shared_ptr<vector<Point>> points; // Vecteur de points pouvant être partagé entre plusieurs parties du programme
+	PinnedMemorySlot pinnedMem; // Slot de mémoire épinglée
 
-	LasHeader lasHeader;
+	LasHeader lasHeader; // Header du fichier las associé au node
 };
 
-bool lazInBatches = false;
-deque<PointBatch> batchesToProcess;
-deque<PointBatch> batchesInPinnedMemory;
-deque<PointBatch> batchesInPageableMemory;
-deque<PinnedMemorySlot> pinnedMemoryInUpload;
-atomic_bool resetInProgress;
-mutex mtx_uploader;
-vector<unique_ptr<mutex>> mtx_loader;
-mutex mtx_batchesToProcess;
-mutex mtx_batchesInPinnedMemory;
-mutex mtx_batchesInPageableMemory;
-mutex mtx_pinnedMemoryInUpload;
+bool lazInBatches = false; // points traités par lots dans les fichiers laz ?
+deque<PointBatch> batchesToProcess; // Liste des batchs à traiter
+deque<PointBatch> batchesInPinnedMemory; // Liste des batchs dans la mémoire épinglée
+deque<PointBatch> batchesInPageableMemory; // Liste des batchs dans la mémoire pageable
+deque<PinnedMemorySlot> pinnedMemoryInUpload; // Liste des slots de mémoire épinglée en cours de transfert vers le GPU
+atomic_bool resetInProgress; // Réinitialisation en cours ?
+mutex mtx_uploader; // Mutex pour les threads de chargement
+vector<unique_ptr<mutex>> mtx_loader; // Mutex pour les threads de chargement
+mutex mtx_batchesToProcess; // Mutex pour la liste des batchs à traiter
+mutex mtx_batchesInPinnedMemory; // Mutex pour la liste des batchs dans la mémoire épinglée
+mutex mtx_batchesInPageableMemory; // Mutex pour la liste des batchs dans la mémoire pageable
+mutex mtx_pinnedMemoryInUpload;	// Mutex pour la liste des slots de mémoire épinglée en cours de transfert vers le GPU
 
-int batchStreamUploadIndex = 0;
-CUdeviceptr cptr_points_ring[BATCH_STREAM_SIZE];
+int batchStreamUploadIndex = 0; // Index du batch en cours de transfert vers le GPU (probablement ?)
+CUdeviceptr cptr_points_ring[BATCH_STREAM_SIZE]; // Tableau de pointeurs de périphériques CUDA vers les batchs de points (tampon circulaire ?)
 
-CUdevice device;
-CUcontext context;
-int numSMs;
+CUdevice device; // Périphérique CUDA à utiliser (= GPU)
+CUcontext context; // Contexte CUDA associé au GPU (indispensable pour les opérations CUDA)
+int numSMs; // Nombre de multiprocesseurs sur le GPU
 
-CUdeviceptr cptr_buffer;
-CUdeviceptr cptr_buffer_persistent;
-CUdeviceptr cptr_nodes;
-CUdeviceptr cptr_renderbuffer;
-CUdeviceptr cptr_stats;
-CUdeviceptr cptr_numBatchesUploaded;
-CUdeviceptr cptr_batchSizes;
-CUdeviceptr cptr_frameStart;
-CUgraphicsResource cugl_colorbuffer;
-CUevent ce_render_start, ce_render_end;
-CUevent ce_update_start, ce_update_end;
-cudaStream_t stream_upload, stream_download;
+// Pointeurs de périphériques CUDA pour les buffers
+CUdeviceptr cptr_buffer; // Tampon mémoire ?
+CUdeviceptr cptr_buffer_persistent; // Tampon mémoire persistant ?
+CUdeviceptr cptr_nodes; // Tampon mémoire pour les nodes de l'octree
+CUdeviceptr cptr_renderbuffer; // Tampon mémoire pour le rendu
+CUdeviceptr cptr_stats; // Tampon mémoire pour les statistiques
+CUdeviceptr cptr_numBatchesUploaded; // Tampon mémoire pour le nombre de batchs chargés sur le GPU
+CUdeviceptr cptr_batchSizes; // Tampon mémoire pour les tailles des batchs sur le GPU
+CUdeviceptr cptr_frameStart; // Tampon mémoire pour le début du frame ?
+CUgraphicsResource cugl_colorbuffer; // Ressource graphique CUDA pour le tampon de couleur
+CUevent ce_render_start, ce_render_end; // Événements CUDA pour le rendu (début & fin)
+CUevent ce_update_start, ce_update_end; // Événements CUDA pour la mise à jour (début & fin)
+cudaStream_t stream_upload, stream_download; // Streams CUDA pour les transferts de données entre CPU et GPU (upload & download)
 
-CudaModularProgram* cuda_program_update = nullptr;
-CudaModularProgram* cuda_program_render = nullptr;
+CudaModularProgram* cuda_program_update = nullptr; // Programme CUDA pour la mise à jour de l'octree (?)
+CudaModularProgram* cuda_program_render = nullptr; // Programme CUDA pour le rendu de l'application
 // CudaModularProgram* cuda_program_filter = nullptr;
-CudaModularProgram* cuda_program_reset  = nullptr;
+CudaModularProgram* cuda_program_reset  = nullptr; // Programme CUDA pour la réinitialisation de l'application
 
-glm::mat4 transform;
-glm::mat4 transform_updatebound;
+glm::mat4 transform; // Transformation de la scène
+glm::mat4 transform_updatebound; // Transformation de la scène pour la mise à jour des bounds
 
-Stats stats;
-void* h_stats_pinned = nullptr;
+Stats stats; // Statistiques de l'application
+void* h_stats_pinned = nullptr; // Pointeur vers les statistiques de l'application
 
-double t_drop_start = 0.0;
+double t_drop_start = 0.0; // Temps de démarrage pour les opérations de rendu ou maj
 
+//Structure de paramètres (normalement, full osef pour l'instant, c'est juste pour l'affichage dans le programme uen fois tt initialisé)
 struct {
 	bool useHighQualityShading       = true;
 	bool showBoundingBox             = false;
@@ -140,17 +145,25 @@ struct {
 	float edlStrength                = 0.8f;
 } settings;
 
+
+// Structure représentant une PinnedMemPool, soit une pool de mémoire épinglée (permettant de garder tt en mémoire sans avoir besoin de réallouer, désallouer, etc)
 struct PinnedMemPool{
-	mutex mtx_pool;
-	mutex mtx_register;
+	mutex mtx_pool; // Mutex pour le pool de mémoire épinglée
+	mutex mtx_register; // Mutex pour les slots de mémoire épinglée enregistrés ?
 
-	deque<PinnedMemorySlot> pool;
-	vector<PinnedMemorySlot> registered;
+	deque<PinnedMemorySlot> pool; // Double file de PinnedMemorySlot -> pool de slots de mémoire épinglée disponibles
+	vector<PinnedMemorySlot> registered; // Vecteur de PinnedMemorySlot -> slots de mémoire épinglée enregistrés
 
+	// Constructeur de la classe PinnedMemPool -> ne fait rieng
 	PinnedMemPool(){
 		
 	}
 
+	/*  
+		Remet tous les batchs enregistrés dans le pool
+		-Vide pool
+		-Ajoute à la fin tous les batchs enregistrés (registered) dans pool
+	*/
 	// put all registered batches back into the pool
 	void refill(){
 		pool.clear();
@@ -160,12 +173,23 @@ struct PinnedMemPool{
 			make_move_iterator(registered.end()));
 	}
 
+	/*  
+		Réserve un certain nombre de slots de mémoire épinglée
+		-Appelle reserveSlot() numSlots fois
+	*/
 	void reserveSlots(int numSlots){
 		for(int i = 0; i < numSlots; i++){
 			this->reserveSlot();
 		}
 	}
-
+	/*
+		Réserve un slot de mémoire épinglée
+		-Alloue un certain nombre de bytes par slot (MAX_BATCH_SIZE * sizeof(Point))
+		-Alloue de la mémoire épinglée (pinnedMem) de taille bytesPerSlot + alignmentPadding
+		-Crée un événement pour la fin du transfert de données (slotEvent)
+		-Crée un PinnedMemorySlot avec les attributs memLocation et uploadEnd
+		-Ajoute le PinnedMemorySlot à pool et registered
+	*/
 	void reserveSlot(){
 		uint64_t bytesPerSlot = MAX_BATCH_SIZE * sizeof(Point);
 		// reserve some extra bytes in case of IO with special alignment
@@ -187,6 +211,16 @@ struct PinnedMemPool{
 		registered.push_back(slot);
 	}
 
+	/*
+		Récupère un emplacement mémoire de la pool
+		-Verrouille mtx_pool
+		-Si pool est vide :
+			-Appelle reserveSlot()
+		-Récupère le premier élément de pool + reset son memOffset
+		-L'enlève de pool (pop_front)
+		-Retourne le slot
+
+	*/
 	PinnedMemorySlot acquire(){
 		lock_guard<mutex> lock(mtx_pool);
 
@@ -203,12 +237,22 @@ struct PinnedMemPool{
 		return slot;
 	}
 
+	/*
+		Remet un slot de mémoire épinglée dans la pool
+		-Verrouille mtx_pool
+		-Ajoute le slot à la fin de pool
+	*/
 	void release(PinnedMemorySlot slot){
 		lock_guard<mutex> lock(mtx_pool);
 
 		pool.push_back(slot);
 	}
 
+	/*
+		Remet plusieurs slots de mémoire épinglée dans la pool (surcharge de release juste avant)
+		-Verrouille mtx_pool
+		-Ajoute tous les slots de slots à la fin de pool
+	*/
 	void release(vector<PinnedMemorySlot> slots){
 
 		if (slots.size() == 0) return;
@@ -224,53 +268,62 @@ struct PinnedMemPool{
 };
 
 
-bool requestReset                  = false;
-bool requestBenchmark              = false;
-atomic_bool requestStepthrough     = false;
-atomic_bool requestStep            = false;
-bool requestColorFiltering         = false;
-float renderingDuration            = 0.0f;
-uint32_t numPointsUploaded         = 0;
-float loadStart                    = 0.0f;
+bool requestReset                  = false; // Demande de réinitialisation
+bool requestBenchmark              = false; // Demande de benchmark
+atomic_bool requestStepthrough     = false; // Demande de pas à pas
+atomic_bool requestStep            = false; // Demande de pas
+bool requestColorFiltering         = false; // Demande de filtrage de couleur
+float renderingDuration            = 0.0f; // Durée du rendu
+uint32_t numPointsUploaded         = 0; // Nombre de points envoyés au GPU
+float loadStart                    = 0.0f; // Temps de démarrage du chargement
 
-float kernelUpdateDuration         = 0.0f;
-float totalUpdateDuration          = 0.0f;
-double minKernelUpdateDuration     = Infinity;
-double maxKernelUpdateDuration     = 0.0;
-double avgKernelUpdateDuration     = 0.0;
-double cntKernelUpdateDuration     = 0.0;
+float kernelUpdateDuration         = 0.0f; // Durée du kernel de mise à jour
+float totalUpdateDuration          = 0.0f; // Durée totale de la mise à jour
+double minKernelUpdateDuration     = Infinity; // Durée minimale du kernel de mise à jour
+double maxKernelUpdateDuration     = 0.0; // Durée maximale du kernel de mise à jour
+double avgKernelUpdateDuration     = 0.0; // Durée moyenne du kernel de mise à jour
+double cntKernelUpdateDuration     = 0.0; // Compteur de la durée du kernel de mise à jour
 
-float kernelRenderDuration         = 0.0f;
-float totalRenderDuration          = 0.0f;
-double minKernelRenderDuration     = Infinity;
-double maxKernelRenderDuration     = 0.0;
-double avgKernelRenderDuration     = 0.0;
-double cntKernelRenderDuration     = 0.0;
+float kernelRenderDuration         = 0.0f; // Durée du kernel de rendu
+float totalRenderDuration          = 0.0f; // Durée totale du rendu
+double minKernelRenderDuration     = Infinity; // Durée minimale du kernel de rendu
+double maxKernelRenderDuration     = 0.0; // Durée maximale du kernel de rendu
+double avgKernelRenderDuration     = 0.0; // Durée moyenne du kernel de rendu
+double cntKernelRenderDuration     = 0.0; // Compteur de la durée du kernel de rendu
 
-atomic_uint64_t numPointsTotal     = 0;
-atomic_uint64_t numPointsLoaded    = 0;
-atomic_uint64_t numBytesTotal      = 0;
-atomic_uint64_t numBytesLoaded     = 0;
-atomic_uint64_t numThreadsLoading  = 0;
-int numBatchesTotal                = 0;
-int numBatchesProcessed            = 0;
-bool lastBatchFinishedDevice       = false;
-uint64_t momentaryBufferCapacity   = 0;
-uint64_t persistentBufferCapacity  = 0;
-vector<double> processFrameTimes; 
+atomic_uint64_t numPointsTotal     = 0; // Nombre total de points
+atomic_uint64_t numPointsLoaded    = 0; // Nombre de points chargés
+atomic_uint64_t numBytesTotal      = 0; // Nombre total d'octets
+atomic_uint64_t numBytesLoaded     = 0; // Nombre d'octets chargés
+atomic_uint64_t numThreadsLoading  = 0; // Nombre de threads de chargement
+int numBatchesTotal                = 0; // Nombre total de batchs
+int numBatchesProcessed            = 0; // Nombre de batchs traités
+bool lastBatchFinishedDevice       = false; // Dernier batch terminé sur le périphérique
+uint64_t momentaryBufferCapacity   = 0; // Capacité du buffer momentané
+uint64_t persistentBufferCapacity  = 0; // Capacité du buffer persistant
+vector<double> processFrameTimes; // Temps de traitement des frames
 
-PinnedMemPool pinnedMemPool;
+PinnedMemPool pinnedMemPool; // Pool de mémoire épinglée
 
-float toggle = 1.0;
-float lastFrameTime = static_cast<float>(now());
-float timeSinceLastFrame = 0.0;
+float toggle = 1.0; // Toggle pour le rendu
+float lastFrameTime = static_cast<float>(now()); // Temps de la dernière frame (maintenant)
+float timeSinceLastFrame = 0.0; // Temps depuis la dernière frame
 
-float3 boxMin  = float3{InfinityF, InfinityF, InfinityF};
-float3 boxMax  = float3{-InfinityF, -InfinityF, -InfinityF};
-float3 boxSize = float3{0.0, 0.0, 0.0};
+float3 boxMin  = float3{InfinityF, InfinityF, InfinityF}; // Bounding box min
+float3 boxMax  = float3{-InfinityF, -InfinityF, -InfinityF}; // Bounding box max
+float3 boxSize = float3{0.0, 0.0, 0.0}; // Taille de la bounding box
 
-uint64_t frameCounter = 0;
+uint64_t frameCounter = 0; // Compteur de frames
 
+/*
+	Initialisation de l'environnement CUDA
+	-Initialisation de la bibliothèque CUDA
+	-Création d'un périphérique CUDA
+	-Création d'un contexte CUDA sur le device
+	-Création de deux streams CUDA non bloquants (upload & download)
+	-Récupération de l'identifiant du device associé au contexte (en gros, une vérification de si les étapes précédentes ont fonctionné)
+	-Récupération du nombre de multiprocesseurs sur le device
+*/
 void initCuda(){
 	cuInit(0);
 	cuDeviceGet(&device, 0);

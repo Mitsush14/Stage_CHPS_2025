@@ -1,0 +1,13 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Set CUDA Path",
+            "type": "shell",
+            "command": "export CUDA_PATH=/apps/spack/spack-softwares/linux-rocky9-zen3/gcc-13.1.0/cuda-12.6.2-5yorddeiikac62soxiznrpdhui3fbq7q",
+            "problemMatcher": []
+        }
+    ]
+}
