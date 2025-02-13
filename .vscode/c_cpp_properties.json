@@ -3,7 +3,10 @@
         {
             "name": "Linux",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/libs/",
+                "${workspaceFolder}/include/",
+                "${workspaceFolder}/modules/progressive_octree/"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

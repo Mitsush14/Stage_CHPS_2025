@@ -16,21 +16,25 @@
 
 #include "../CudaPrint/CudaPrint.cuh"
 
+// Namespace appartenant à CUDA et facilitant la gestion des groupes de threads
 namespace cg = cooperative_groups; 
 
-constexpr uint64_t VOXEL_BACKLOG_CAPACITY = 10'000'000;
-constexpr float MAX_PROCESSING_TIME = 10.0f;
+// Constantes
+constexpr uint64_t VOXEL_BACKLOG_CAPACITY = 10'000'000; // Capacité max pour les voxels en attente
+constexpr float MAX_PROCESSING_TIME = 10.0f; // Temps max de traitement
 
-Allocator* allocator;
-uint32_t* errorValue;
-AllocatorGlobal* allocator_persistent;
-Stats* stats = nullptr;
+// Variables globales
 
-Point* backlog_voxels      = nullptr;
-Node** backlog_targets     = nullptr;
-uint32_t* numBacklogVoxels = nullptr;
-Chunk** chunkQueue         = nullptr;
-CudaPrint* cudaprint       = nullptr;
+Allocator* allocator; // Allocation de mémoire (TODO : voir comment ça fonctionne)
+uint32_t* errorValue; // Simple valeur d'erreur
+AllocatorGlobal* allocator_persistent; // Allocation de mémoire persistante (TODO : voir comment ça fonctionne)
+Stats* stats = nullptr; // Struct pour stocker des stats
+
+Point* backlog_voxels      = nullptr; // Tableau de voxels en attente
+Node** backlog_targets     = nullptr; // Tableau de noeuds cibles pour les voxels en attente
+uint32_t* numBacklogVoxels = nullptr; // Nombre de voxels en attente
+Chunk** chunkQueue         = nullptr; // File d'attente de chunks
+CudaPrint* cudaprint       = nullptr; // Objet pour afficher des messages CUDA
 
 // https://colorbrewer2.org/#type=diverging&scheme=Spectral&n=8 (byte order inverted)
 uint32_t SPECTRAL[8] = {
@@ -816,6 +820,28 @@ void insertVoxels(int batchIndex){
 	});
 }
 
+
+/*
+	?
+	-Récupération de la grille sur laquelle on effectue les opérations
+	-Récupération du bloc où seront fait les opérations
+	-Si rank == 0, initialisation des compteurs
+	-Synchronisation de la grille
+	-Utilisation d'expand pour augmenter l'octree
+	-Synchronisation de la grille
+	-Création des voxels à partir des points (voxelSampling)
+	-Synchronisation de la grille
+	-Allocation de mémoire pour les points dans les noeuds feuilles (allocatePointChunks)
+	-Synchronisation de la grille
+	-Allocation de mémoire pour les voxels de chaque noeud (allocateVoxelChunks)
+	-Synchronisation de la grille
+	-Insertion des points dans les noeuds feuilles (insertPoints)
+	-Synchronisation de la grille
+	-Insertion des voxels dans l'octree (insertVoxels)
+	-Synchronisation de la grille
+	-Si rank == 0, calcul du temps d'exécution de chaque étape enregistré au préalable
+*/
+
 void addBatch(
 	Point* points, uint32_t batchSize,
 	int batchIndex,
@@ -920,6 +946,52 @@ void addBatch(
 	}
 }
 
+
+/*
+	Kernel Cuda pour la construction de l'octree (__global__ = c'est sur le GPU, mais on peut l'appeler depuis le CPU)
+	-Initialisation des variables (grille, bloc, temps initial, allocator, allocator_persistent, numBatchesUploaded_global) TODO : voir comment fonctionne leur fonction d'allocation
+	-Allocation de la mémoire pour les variables de stats
+		-ellapsed_nanos : temps écoulé
+		-backlog_voxels : mémoire pour les voxels en attente
+		-backlog_targets : mémoire pour les noeuds en attente
+		-numBacklogVoxels : nombre de voxels en attente
+		-spillingNodes : mémoire pour les noeuds à diviser
+		-numSpillingNodes : nombre de noeuds à diviser
+		-spilledPoints : mémoire pour les points à redistribuer
+		-numSpilledPoints : nombre de points à redistribuer
+		-chunkQueue : file d'attente pour les chunks
+	-Synchronisation de la grille
+	-Création de la boîte englobante de l'octree
+		-boxSize : taille de la boîte
+		-octreeSize : taille de l'octree (max sur les 3 dimensions de la box)
+		-octreeMin : coin inférieur de la boîte (?)
+		-octreeMax : coin supérieur de la boîte (octreeMin + octreeSize)
+		-cubePosition : centre de la boîte vis à vis de l'octree
+	-Synchronisation de la grille
+	-Création d'une variable globale numBatchesUploaded qui récupère la valeur de _numBatchesUploaded_volatile	(pour être sûr que ts les threads aient la même valeur)
+	-Synchronisation de la grille
+	-Incrémentation de numBatchesUploaded (atomicAdd) pour récupérer le nombre de batchs à traiter
+	-Synchronisation de la grille
+	-Création de variables pour les tailles max des sous-patchs et des batchs
+	-Création de variables pour le nombre de batch à créer, le numéro du 1er batch, le numéro du dernier batch
+	-Boucle sur les batchs :
+		-Récupération de la taille du batch
+		-Récupération des points du batch
+		-Récupération d'infos sur la mémoire (taille totale, utilisation actuelle) + calcul de la taille que prendra le batch ds la mémoire
+		-Si mémoire presque pleine + rank == 0 :
+			-Message d'erreur + passage d'un booléen sur la mémoire à true + sortie de la boucle
+		-Appel à addBatch pour ajouter le batch à l'octree
+		-Synchronisation de la grille
+		-Si rank == 0 :
+			-Incrémentation du compteur de batchs traités et du nombre de points traités
+		-Synchronisation de la grille
+		-Si rank == 0 :
+			-Calcul du temps écoulé depuis le début de la frame
+		-Synchronisation de la grille
+		-Si temps écoulé depuis le début > 16ms :
+			-On sort de la boucle
+	-Calcul de plusieurs stats
+*/
 extern "C" __global__
 void kernel_construct(
 	const Uniforms uniforms,
