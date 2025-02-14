@@ -1436,9 +1436,9 @@ int main(){
 			ImGui::Checkbox("Benchmark Rendering",      &settings.benchmarkRendering);
 
 			//Rajout d'un bouton pour save l'octree
-			/*if(ImGui::Button("Save Octree")){
+			if(ImGui::Button("Save Octree")){
 				saveOctree();
-			}*/
+			}
 
 			if(ImGui::Button("Reset")){
 				requestReset = true;

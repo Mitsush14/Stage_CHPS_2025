@@ -1197,4 +1197,3 @@ void kernel_construct(
 		stats->frameID                   = uniforms.frameCounter;
 	}
 }
-
