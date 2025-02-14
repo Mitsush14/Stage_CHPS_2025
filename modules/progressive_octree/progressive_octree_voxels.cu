@@ -127,7 +127,7 @@ void sampleVoxel(Node* node,
 	}
 }
 
-// TODO : vérifier comment ça fonctionne
+// TODO : à commenter plus précisément
 // Permet de compter les points dans un octree
 // Si nb points supérieurs à MAX_POINTS_PER_NODE, il est ajouté à une liste de noeuds à diviser
 // Points en trop stockés dans spilledPoints pour être réinsérés après division des noeuds
@@ -614,7 +614,6 @@ void allocatePointChunks(Node* root, Point* points, int numPoints, Node* nodes){
 	}
 }
 
-
 /*
 	Insertion des points dans l'octree
 	-Récupération de la grille sur laquelle on effectue les opérations
@@ -820,9 +819,8 @@ void insertVoxels(int batchIndex){
 	});
 }
 
-
 /*
-	?
+	Ajout de batch dans l'octree (?)
 	-Récupération de la grille sur laquelle on effectue les opérations
 	-Récupération du bloc où seront fait les opérations
 	-Si rank == 0, initialisation des compteurs
@@ -841,7 +839,6 @@ void insertVoxels(int batchIndex){
 	-Synchronisation de la grille
 	-Si rank == 0, calcul du temps d'exécution de chaque étape enregistré au préalable
 */
-
 void addBatch(
 	Point* points, uint32_t batchSize,
 	int batchIndex,
@@ -945,7 +942,6 @@ void addBatch(
 		);
 	}
 }
-
 
 /*
 	CEST CA QUI EST APPELE DANS [main_progressive_octree.cpp](le main), updateOctree
@@ -1079,6 +1075,7 @@ void kernel_construct(
 	auto tStart_addBatches = nanotime();
 	
 	// ADD BATCHES OF POINTS TO OCTREE
+	// TODO : CEST A PARTIR DE LA QUE LOCTREE EST CONSTRUIT (jcrois)
 	for(int batchIndex = firstBatch; batchIndex < lastBatch; batchIndex++){
 		
 		uint32_t ringSlotIndex = batchIndex % BATCH_STREAM_SIZE;
@@ -1110,7 +1107,7 @@ void kernel_construct(
 			nodes, 
 			spillingNodes, numSpillingNodes,
 			spilledPoints, numSpilledPoints
-		);
+		); 
 		
 		grid.sync();
 

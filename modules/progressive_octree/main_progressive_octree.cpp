@@ -182,6 +182,7 @@ struct PinnedMemPool{
 			this->reserveSlot();
 		}
 	}
+	
 	/*
 		Réserve un slot de mémoire épinglée
 		-Alloue un certain nombre de bytes par slot (MAX_BATCH_SIZE * sizeof(Point))
@@ -335,6 +336,7 @@ void initCuda(){
 	cuDeviceGetAttribute(&numSMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device);
 }
 
+// TODO : à commenter
 Uniforms getUniforms(shared_ptr<GLRenderer> renderer){
 	Uniforms uniforms;
 
@@ -519,6 +521,7 @@ void updateOctree(shared_ptr<GLRenderer> renderer){
 // }
 
 // draw the octree with a CUDA kernel
+// TODO : commenter cette fonction
 void renderCUDA(shared_ptr<GLRenderer> renderer){
 
 	Uniforms uniforms = getUniforms(renderer);
@@ -605,10 +608,22 @@ void renderCUDA(shared_ptr<GLRenderer> renderer){
 
 // TODO : PROBABLEMENT A MODIFIER (là où on alloue 80% de la mémoire du GPU)
 // compile kernels and allocate buffers
+
+/*
+	Initialisation du programme CUDA
+	-Initialisation de plusieurs variables de capacités
+	-Allocation de la plupart des buffers GPU
+	-Allocation d'un buffer en anneau pour l'upload de points -> plusieurs segments, chacun utilisé sur un batch de points
+	-Allocation d'un buffer persistant pour stocker les données restantes du GPU (80% de la mémoire totale)
+	-Affichage des tailles des buffers
+	-Création de plusieurs programmes CUDA modulaires pour les différentes parties de l'application (update, render, reset)
+	-Création d'événements CUDA pour le rendu et la mise à jour
+	-Enregistrement de l'image couleur du framebuffer dans une ressource graphique CUDA, permettant à CUDA d'intéragir avec la texture pour l'écriture
+*/
 void initCudaProgram(shared_ptr<GLRenderer> renderer){
 
 	// allocate most gpu buffers
-	uint64_t nodesCapacity           = 200'000;
+	uint64_t nodesCapacity           = 200'000; // Nombre max de nodes dans l'octree
 	uint64_t estimatedNodeSize       = 200;           // see struct Node in progressive_octree.cu, but some more just in case
 	uint64_t cptr_buffer_bytes       = 300'000'000;
 	uint64_t cptr_nodes_bytes        = nodesCapacity * estimatedNodeSize;
@@ -703,7 +718,31 @@ void initCudaProgram(shared_ptr<GLRenderer> renderer){
 }
 
 
-// Ouverture et lecture d'un fichier
+/*
+	Réinitialisation et rechargement des données pour le traitement de points dans un octree progressif
+	-Initialisation de plusieurs variables de durée
+	-Verrouillage des mutex pour les listes de batchs à traiter, dans la mémoire épinglée et pageable, et en cours de transfert
+	-Remise à zéro des données chargées et du workload
+	-Itération sur les fichiers d'entrée pour récupérer les informations de bounding box et de nombre de points
+		-Si le fichier est un fichier LAS ou LAZ :
+			-Récupération de l'entête du fichier
+			-Incrémentation du nombre total de points
+			-Mise à jour de la bounding box min et max
+			-Itération sur les points du fichier par batch de taille MAX_BATCH_SIZE
+				-Création d'un batch de points
+				-Ajout du batch à la liste des batchs à traiter
+				-Incrémentation du nombre total de batchs
+		-Si le fichier est un fichier SIMLOD :
+			-Lecture des 24 premiers octets du fichier
+			-Récupération du nombre de points (taille du fichier - 24) / 16
+			-Mise à jour de la bounding box min et max
+			-Incrémentation du nombre total de points
+			-Itération sur les points du fichier par batch de taille MAX_BATCH_SIZE
+				-Création d'un batch de points
+				-Ajout du batch à la liste des batchs à traiter
+				-Incrémentation du nombre total de batchs
+	-Remise à zéro des statistiques
+*/
 void reload(){
 
 	printfmt("start loading \n");
@@ -807,10 +846,6 @@ void reload(){
 				numBatchesTotal++;
 			}
 		}
-
-		
-
-		
 	}
 
 	// std::random_device rd;
@@ -835,7 +870,20 @@ void reload(){
 	processFrameTimes.clear();
 }
 
-
+/*
+	Réinitialisation de l'état du programme
+	-Initialisation d'une variable de réinitialisation en cours (tant qu'elle est vraie, les threads d'upload et de chargement ne peuvent pas accéder aux mutex)
+	-Verrouillage des mutex des threads de chargement
+	-Verrouillage du mutex d'upload
+	-Attente de la fin de l'upload
+	-Réinitialisation de l'état du programme sur le device
+	-Attente de la fin de la copie des statistiques
+	-Copie des statistiques de la mémoire épinglée vers la mémoire pageable
+	-Attente de la fin de la copie
+	-Réinitialisation de l'état du programme sur le host pour recharger les données actuelles depuis le disque (reload)
+	-Désactivation de la demande de réinitialisation
+	-RestInProgress = true + Déverrouillage des threads de chargement
+*/
 void reset(shared_ptr<GLRenderer> renderer){
 	// before locking, notify threads that they should not try to acquire the lock (otherwise we might wait for a long time to lock the others out)
 	resetInProgress = true;
@@ -872,6 +920,38 @@ void reset(shared_ptr<GLRenderer> renderer){
 	}
 }
 
+
+/*
+	Création d'un thread de chargement de points
+	-Initialisation d'une variable de données CPU
+	-Création d'un thread pour charger les points :
+		-Se synchronise sur le contexte CUDA
+		-Tant que true :
+			-Vérification de si tout est chargé ou si le traitement des données est en retard
+			-Si tout est chargé, que le traitement n'a pas de retard et qu'aucune réinitialisation est en cours :
+				-Attente de 1ms avant de continue (arrêter l'itération courante et en commencer une nouvelle)
+			-Verrouillage du mutex interne
+			-Verrouillage du mutex concernant les batchs à process
+			-Tentative de récupération d'un batch de points (si la liste n'est pas vide) : 
+				-Récupère le 1er batch de la liste
+				-Le fichier est de type laz ?
+					-Oui : limitation du nombre de thread de chargement actif pour éviter surcharge
+				-Pop le batch chargé de la liste
+			-Deverrouillage du mutex concernatn les batchs à process
+			-Récupération d'un slot de mémoire épinglé à partir du pool de mémoire épinglée
+			-Si un batch a bien été trouvé:
+				-Chargement des points en fonction du type de fichier :
+					-las : utilisation de la fonction loadLasNative
+					-laz : utilisation de la bibliothèque laszip poue lire les points compressés et les décompresser dans la mémoire épinglée
+					-simlod : utilisation de la fonction loadFileNative pour charger les points de manière non bufferisée (pour maximiser les performances sur SSD)
+				-Une fois les points chargés, mise à jour du nombre de points et d'octets chargés
+				-Attribution de l'emplacement mémoire épinglé au batch
+				-Rajoute le batch nouvellement rempli dans la liste des batchs en mémoire épinglée (batchesInPinnedMemory)
+				-Diminue le nombre de threads de chargement actifs
+			-Sinon, remet la mémoire épinglée dans le pool
+			-Attente de 1ms avant de continuer
+	-Détachement du thread du thread principal
+*/
 void spawnLoader(size_t i) {
 
 	auto cpu = getCpuData();
@@ -1021,10 +1101,50 @@ void spawnLoader(size_t i) {
 	t.detach();
 }
 
-//TODO : PROBABLEMENT A MODIFIER (là où on upload les données sur le GPU)
 // Spawns a thread that uploads data to the GPU
 // - Asynchronously schedules uploads in stream_upload
 // - After every async copy, it also asynchronously updates the number of uploaded points
+/*
+	Création d'un thread d'envoi de points
+	-Création d'un thread pour envoyer les points :
+		-Tant que true :
+			-Initialisation de la variable de temps de début
+			-Initialisation de la variable de temps de spin
+			-Si reset en cours :
+				-Attente de 1ms avant de continue (arrêter l'itération courante et en commencer une nouvelle)
+			-Verrouillage du mutex d'envoi
+			-Tant que le temps actuel est inférieur au temps de début + le temps de spin :
+				-Attente de 100ns (spin plutôt que sleep car ce dernier est trop long)
+			-Si demande de pas à pas :
+				-Si demande de pas :
+					-Passer à false
+				-Sinon :
+					-Continue
+			-Verrouillage du mutex pour la liste des mémoires épinglées
+			-Tant que la liste des slots mémoire en cours d'envoi sur le GPU n'est pas vide et que l'événement CUDA d'envoi des données est terminé :
+				-Ajout de la mémoire épinglée à la fin de la liste des mémoires épinglées disponibles
+				-Suppression de la mémoire épinglée de la liste des mémoires épinglées en cours d'envoi
+			-Déverrouillage du mutex pour la liste des mémoires épinglées
+			-Remise dans la pool de mémoire épinglées les slots mémoire disponibles
+			-Si tout est fait (index actuel de batch == nombre de batchs total) :
+				-Continue 
+			-Si y'a de lag dans le traitement des données (nombre de points chargés > nombre de points traités + taille max d'un batch * taille max d'un batch) :
+				-Continue
+			-Spin (pour acquérir un batch):
+				-Verrouillage du mutex pour les batchs en mémoire épinglée
+				-Si la liste n'est pas vide :
+					-Récupération du 1er batch de la liste
+					-Suppression du batch de la liste
+				-Sinon :
+					-Continue
+			-Calcul de l'index de l'emplacement cible dans le buffer en anneau (uploadRingIndex)
+			-Copie asynchrone des données de la mémoire épinglée vers le GPU (cuMemcpyHtoDAsync)
+			-Enregistrement de l'événement d'envoi des données
+			-Mise à jour de la taille des batchs et le nombre total de batchs chargées
+			-Verrouillage du mutex pour les mémoires épinglées en cours d'envoi
+			-Ajout de la mémoire épinglée à la fin de la liste des mémoires épinglées en cours d'envoi
+	-Détachement du thread du thread principal	
+*/
 void spawnUploader(shared_ptr<GLRenderer> renderer) {
 	double timestamp = now();
 
@@ -1125,6 +1245,10 @@ void spawnUploader(shared_ptr<GLRenderer> renderer) {
 	t.detach();
 
 	setThreadPriorityHigh(t);
+}
+
+void saveOctree(){
+	printfmt("saving octree \n");
 }
 
 //ENFIN LE MAIN 
@@ -1310,6 +1434,11 @@ int main(){
 			ImGui::Checkbox("High-Quality-Shading",     &settings.useHighQualityShading);
 			ImGui::Checkbox("Auto-focus on load",       &settings.autoFocusOnLoad);
 			ImGui::Checkbox("Benchmark Rendering",      &settings.benchmarkRendering);
+
+			//Rajout d'un bouton pour save l'octree
+			/*if(ImGui::Button("Save Octree")){
+				saveOctree();
+			}*/
 
 			if(ImGui::Button("Reset")){
 				requestReset = true;
