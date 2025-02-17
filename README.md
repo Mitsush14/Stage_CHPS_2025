@@ -22,5 +22,5 @@ Instructions pour relancer SimLOD sur Juliet depuis une précédente compilation
  ou
 
   	./start.sh
-   	./SimlLOD
+   	cd out && ./SimlLOD
 yé, ça remarche !
