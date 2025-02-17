@@ -1247,8 +1247,11 @@ void spawnUploader(shared_ptr<GLRenderer> renderer) {
 	setThreadPriorityHigh(t);
 }
 
-void saveOctree(){
+
+// Sauvegarder l'octree dans plein de fichiers coorespondant à chaque chunk de l'octree
+void saveOctree(settings* settings, Node * nodes /*Pour l'instant, j'sais pas encore où les récupérer*/){
 	printfmt("saving octree \n");
+	
 }
 
 //ENFIN LE MAIN 
