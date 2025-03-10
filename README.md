@@ -3,7 +3,7 @@ Mise en place d'un système Out-Of-Core pour le logiciel [SimLOD](https://github
 
 Instruction de compilation/installation pour SIMLOD sur Juliet :
 
- 	visu (prendre la config de base, mais tests à faire avec autres gpus)
+ 	visu (pour lire tous les fichiers, prendre 6 cpus, 32go ram, 16go vram)
  	scl enable gcc-toolset-14 bash
 	git clone https://github.com/m-schuetz/SimLOD.git
 	ajout de #include <stdint.h> dans fichier modules/progressive_octree/SimlodLoader.h
