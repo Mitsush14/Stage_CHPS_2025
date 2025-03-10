@@ -53,14 +53,16 @@ struct Lines{
 	unsigned int padding2;
 	Point* vertices;
 };
-
+float dot_cuda(const float4& a, const float4& b){
+	return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+}
 // Surcharge de l'opérateur de multiplication pour les float4 -> reourne un vecteur de 4 floats
 float4 operator*(const mat4& a, const float4& b){
 	return make_float4(
-		dot(a.rows[0], b),
-		dot(a.rows[1], b),
-		dot(a.rows[2], b),
-		dot(a.rows[3], b)
+		dot_cuda(a.rows[0], b),
+		dot_cuda(a.rows[1], b),
+		dot_cuda(a.rows[2], b),
+		dot_cuda(a.rows[3], b)
 	);
 }
 

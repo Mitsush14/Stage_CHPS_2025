@@ -13,7 +13,8 @@ add_executable(${PROJECT_NAME}
 	src/GLRenderer.cpp
     include/unsuck_platform_specific.cpp	
     modules/progressive_octree/LasLoader.cpp	
-    modules/progressive_octree/SimlodLoader.cpp	
+    modules/progressive_octree/SimlodLoader.cpp
+	#modules/progressive_octree/save_load.cpp
 	modules/progressive_octree/main_progressive_octree.cpp)
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
 set_target_properties(${PROJECT_NAME} PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
